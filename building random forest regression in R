@@ -1,0 +1,135 @@
+# Load library
+library(MASS)
+library(caret)
+library(raster)
+library(randomForest)
+library(sp)
+
+###################   Training Data  #######################
+# Read point data
+point <- read.csv("pointfile.csv")
+coordinates(point) <- ~ LATITUDE + LONGITUDE //convert them into spatial points data frame
+crs(point) <- crs(MAT)
+
+# Read predictors raster file
+path <- "C:/Users/z/Documents/R/Kfactor"
+f <- list.files(path=path, pattern='tif$', full.names=TRUE)
+environment <- lapply(f, raster)
+r <- stack(environment)
+
+# Extract raster value by points
+Environment <- readAll(r)  
+rasValue <- extract(Environment, point, method="bilinear") 
+
+# Combine raster values with point and save as a CSV file
+PointValue <- cbind(point,rasValue)
+write.table(PointValue,file="PointValue.csv", append=FALSE, sep=",", row.names=FALSE, col.names=TRUE) 
+
+
+###################   Random Forest  #######################
+# Read the sampling data
+Tdata <- read.csv("envi_factors.csv")
+Tdata <- na.omit(Tdata)
+str(Tdata)
+
+# Tunning parameters
+# Tune the optimal ntree parameter
+# Tune the optimal mtry parameter
+control <- trainControl(method="repeatedcv", number=10, repeats=10, search="random")
+rf_random1 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=300, trControl=control) 
+print(rf_random1)
+plot(rf_random1)
+rf_random2 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=500, trControl=control)
+print(rf_random2)
+plot(rf_random2)
+rf_random3 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=800, trControl=control) 
+print(rf_random3)
+plot(rf_random3)
+rf_random4 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=1000, trControl=control) 
+print(rf_random4)
+plot(rf_random4)
+rf_random5 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=1200, trControl=control) 
+print(rf_random5)
+plot(rf_random5)
+rf_random6 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=1400, trControl=control) 
+print(rf_random6)
+plot(rf_random6)
+rf_random7 <- train((K)~., data=Tdata, method="rf", tuneGrid = data.frame(mtry = c(1:61)), ntree=1600, trControl=control)
+print(rf_random7)
+plot(rf_random7)
+
+# Build the optimized regression model
+rf0 <- randomForest((K)~., data=Tdata, ntree=1400, mtry=17, importance=TRUE, proximity=TRUE)
+
+# the importance of environmental variables
+rf0$importance
+
+# cross validation 
+# define training control
+control <- trainControl(method="repeatedcv", number=10, repeats=10, search="random")
+# train the model
+model <- train((K)~., data=Tdata, method="rf", ntree=1400, tuneGrid = data.frame(mtry = c(17)), trControl=control)
+# summarize results
+print(model)
+model$results
+
+###################   Making Plots  #######################
+# Make scatter density plot
+prediction <- predict(model, newdata = Tdata)
+
+## Use densCols() output to get density at each point
+x <- densCols(Tdata$K,prediction, colramp=colorRampPalette(c("black", "white")))
+dens <- col2rgb(x)[1,] + 1L
+faithful <- data.frame(Tdata$K, prediction, dens) 
+
+## Map densities to colors
+cols <-  colorRampPalette(c("#480571","#4A4A83","#1C9785","#8BD343","#FEDB3A", "#F0F6A4"))
+
+ggplot(faithful, aes(x=Tdata$K, y=prediction)) + 
+  geom_point(aes(color=factor(dens)), shape=20, size=4) + theme_bw() +
+  theme(legend.position = "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text = element_text(size=18), axis.title = element_blank()) +
+  scale_color_manual(values = cols) +
+  xlim(0, 0.1) + ylim(0, 0.075) +
+  geom_smooth(method='lm', se=FALSE, color="red", size=0.9) +
+  geom_abline(slope=1, intercept=0, size=0.9)
+
+eq <- lm(prediction ~ Tdata$K) 
+cor(Tdata$K, prediction) 
+
+# Make frequency distribution plot
+group <- c(rep(1,4262),rep(2,4262))
+k <- c(Tdata$K,prediction)
+data <- data.frame(k, group)
+
+ggplot(data, aes(x=k, group=group, fill=group)) +
+  geom_density(alpha=0.3) + theme_bw() +
+  theme(legend.position = "none", panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  axis.text = element_text(size=18), axis.title = element_blank()) +
+  scale_y_continuous(breaks=c(0, 10, 20, 30, 40, 50))
+
+###################   Prediction Interval  #######################
+pred.rf <- predict(rf0, newdata = Tdata, predict.all = TRUE)
+pred.int <- apply(pred.rf$individual, 1, function(x){
+  c(mean(x) + c(-1,1) * sd(x),
+    quantile(x, c(0.1, 0.9)))
+})
+
+head(t(pred.int))
+lower <- t(pred.int)[,3]
+upper <- t(pred.int)[,4]
+uncertainty <- t(pred.int)[,4]-t(pred.int)[,3]
+
+interval <- cbind(Tdata[,3:5],lower,upper,uncertainty)
+names(interval) <- c("LATITUDE","LONGITUDE","K","lower","upper","uncertainty")
+coordinates(interval) <- ~LATITUDE+LONGITUDE
+
+write.csv(interval, file = 'interval.csv')
+
+###################   Digital Mapping  #######################
+# Predict raster
+forest_prob <- raster::predict(rf0, object=ApPl_stack, interval="confidence", level=0.90) 
+plot(forest_prob)
+
+# save the predictions
+writeRaster(forest_prob,'randomForest.tif', overwrite=TRUE)
